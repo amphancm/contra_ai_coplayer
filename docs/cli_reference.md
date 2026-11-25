@@ -45,14 +45,20 @@ Train a Player 2 PPO policy headlessly in `ContraCoPlayerEnv`.
 | `--n-envs` | `int` | `1` | Number of environments (`SubprocVecEnv` when `> 1`, `DummyVecEnv` when `1`) |
 | `--n-steps` | `int` | `512` | Rollout steps per environment per PPO update |
 | `--batch-size` | `int` | `64` | Minibatch size |
-| `--lr` | `float` | `3e-4` | Learning rate |
+| `--lr` | `float` | `3e-4` | Initial learning rate |
+| `--no-lr-decay` | flag | `False` | Disable linear learning-rate decay |
 | `--ent-coef` | `float` | `0.015` | Entropy coefficient |
-| `--net-arch` | `str` | `128,128` | Comma-separated MLP hidden layer sizes |
+| `--net-arch` | `str` | `128,128` | Comma-separated MLP hidden layer sizes (e.g. `256,256`) |
 | `--frame-skip` | `int` | `4` | Emulator frames per RL action |
+| `--frame-stack` | `int` | `4` | Number of stacked observations per RL step (`38 * frame_stack` dims) |
 | `--max-steps` | `int` | `1500` | Max RL steps per episode |
+| `--p1-partner` | `str` | `diverse` | Simulated P1 partner policy (`diverse`, `rule`, or `scripted`) |
+| `--terminate-on-death` | flag | `False` | Terminate episode immediately on P2 death |
 | `--device` | `str` | `auto` | PyTorch device (`auto`, `cpu`, `cuda`) |
 | `--seed` | `int` | `42` | Random seed |
 | `--checkpoint-freq` | `int` | `0` | Checkpoint interval in total timesteps (`0` = disabled) |
+| `--eval-freq` | `int` | `0` | `EvalCallback` interval in total timesteps (`0` = disabled); saves best model to `<out>_best/best_model.zip` |
+| `--eval-episodes` | `int` | `5` | Number of deterministic episodes per `EvalCallback` evaluation |
 | `--resume` | `str` | `None` | Path to existing PPO `.zip` model to continue training |
 
 ---
@@ -70,6 +76,7 @@ Evaluate a trained PPO model or the `RuleAI` baseline across multiple episodes.
 | `--episodes` | `int` | `5` | Number of evaluation episodes |
 | `--max-steps` | `int` | `800` | Max RL steps per episode |
 | `--frame-skip` | `int` | `4` | Emulator frames per RL action |
+| `--p1-partner` | `str` | `scripted` | Simulated P1 partner policy for evaluation (`scripted`, `rule`, or `diverse`) |
 | `--stochastic` | flag | `False` | Sample stochastic PPO actions instead of deterministic argmax |
 | `--seed` | `int` | `123` | Base random seed (`seed + ep` per episode) |
 

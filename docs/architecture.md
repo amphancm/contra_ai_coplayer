@@ -25,10 +25,10 @@ flowchart LR
 | `src/contra_coplayer/state.py` | `GameStateDetector` and `analyze_obstacles`. Extracts structured `GameState` from NES RAM and performs lightweight luminance/edge heuristics on the RGB frame around P2. |
 | `src/contra_coplayer/app.py` | Real-time frontend (`run`, `main`), `SDLQueuedAudio`, `RuleAI`, layout-independent keyboard/gamepad input (`human_input`), and `draw_debug_overlay`. |
 | `src/contra_coplayer/dashboard.py` | `TerminalDashboard`: throttled, zero-dependency ANSI terminal UI displaying runtime stats, P1/P2 telemetry, co-op spacing status, entity/threat counts, obstacle cues, and a 40×7 ASCII mini-radar. |
-| `src/contra_coplayer/env.py` | Gymnasium environment (`ContraCoPlayerEnv`), 38-dim observation encoder (`encode_observation`), shaped co-op reward (`compute_reward`), `ScriptedP1Partner`, and Stage 1 2P save-state bootstrapper. |
-| `src/contra_coplayer/policy.py` | `PPOPolicy`: loads a Stable-Baselines3 PPO `.zip` model and maps `GameState` to Libretro joypad button sets with automatic B-button pulsing for continuous rifle fire. |
-| `src/contra_coplayer/train.py` | PPO training pipeline (`train_ppo`) supporting `DummyVecEnv` (single env) and `SubprocVecEnv` (parallel envs), periodic checkpoints, model resume, and JSON training summaries. |
-| `src/contra_coplayer/eval_model.py` | Headless evaluation CLI (`evaluate_policy`) to benchmark a PPO model or the `RuleAI` baseline across multiple episodes. |
+| `src/contra_coplayer/env.py` | Gymnasium environment (`ContraCoPlayerEnv`), 38-dim observation encoder (`encode_observation`) with optional frame stacking, 15 discrete actions, shaped co-op reward (`compute_reward`), P1 partner policies (`DiverseP1Partner`, `RuleP1Partner`, `ScriptedP1Partner`), and Stage 1 2P save-state bootstrapper. |
+| `src/contra_coplayer/policy.py` | `PPOPolicy`: loads a Stable-Baselines3 PPO `.zip` model, auto-detects `frame_stack` and `frame_skip`, and maps `GameState` to Libretro joypad button sets with automatic B-button pulsing for continuous rifle fire. |
+| `src/contra_coplayer/train.py` | PPO training pipeline (`train_ppo`) supporting `DummyVecEnv` (single env) and `SubprocVecEnv` (parallel envs), linear LR decay, `EvalCallback` best-model saving, periodic checkpoints, model resume, and JSON training summaries. |
+| `src/contra_coplayer/eval_model.py` | Headless evaluation CLI (`evaluate_policy`) to benchmark a PPO model (auto-detecting `frame_stack`) or the `RuleAI` baseline across multiple episodes and P1 partner modes. |
 
 ## Libretro Host (`libretro.py`)
 

@@ -6,7 +6,9 @@ from contra_coplayer.env import (
     ACTIONS,
     OBS_DIM,
     ContraCoPlayerEnv,
+    DiverseP1Partner,
     RewardConfig,
+    RuleP1Partner,
     compute_reward,
     encode_observation,
 )
@@ -77,6 +79,37 @@ def test_compute_reward_progress_score_coop_and_death():
     r_dead, terms_dead = compute_reward(prev, curr_dead, cfg)
     assert terms_dead["death"] == cfg.death_penalty
     assert r_dead < 0
+    # Rebalanced reward: trading a life for a 500-pt enemy kill must still be net negative
+    curr_trade = _sample_state(scroll_x=100, p2_score=500, p2_lives=1)
+    r_trade, _ = compute_reward(prev, curr_trade, cfg)
+    assert r_trade < 0
+    # Stagnation penalty applies when stagnant=True
+    _, terms_stag = compute_reward(prev, prev, cfg, stagnant=True)
+    assert terms_stag["stagnation"] == cfg.stagnation_penalty
+
+
+def test_expanded_action_space():
+    assert len(ACTIONS) == 15
+    assert frozenset({4, 0}) in ACTIONS   # UP+B
+    assert frozenset({5, 8}) in ACTIONS   # DOWN+A
+    assert frozenset({8, 0}) in ACTIONS   # A+B
+
+
+def test_rule_and_diverse_p1_partners():
+    st = _sample_state(p1_x=140, p1_y=100, p2_x=120, p2_y=100)
+    partner = RuleP1Partner(rng=np.random.default_rng(0), pause_prob=0.0)
+    # Pit ahead triggers jump (A=8)
+    keys_pit = partner.act(st, obstacles_p1=ObstacleInfo(pit_ahead=True))
+    assert 8 in keys_pit
+    # Enemy bullet directly ahead of P1 triggers jump (A=8)
+    partner.reset(np.random.default_rng(0))
+    keys_bullet = partner.act(st, obstacles_p1=ObstacleInfo(ground_ahead=True))
+    assert 8 in keys_bullet
+    # DiverseP1Partner resets and produces valid button sets
+    diverse = DiverseP1Partner(rng=np.random.default_rng(1))
+    diverse.reset()
+    keys_div = diverse.act(st, obstacles_p1=ObstacleInfo(ground_ahead=True))
+    assert isinstance(keys_div, set)
 
 
 def test_libretro_save_and_load_state_roundtrip(tmp_path):
@@ -124,7 +157,7 @@ def test_contra_env_and_ppo_train_eval_smoke(tmp_path):
     finally:
         env.close()
 
-    # 2) Smoke-train PPO (64 timesteps on CPU for fast unit test)
+    # 2) Smoke-train PPO (64 timesteps on CPU with diverse P1 + EvalCallback)
     saved_zip = train_ppo(
         str(core),
         str(rom),
@@ -134,14 +167,22 @@ def test_contra_env_and_ppo_train_eval_smoke(tmp_path):
         n_steps=32,
         batch_size=32,
         max_steps=40,
+        p1_partner="diverse",
+        eval_freq=32,
+        eval_episodes=1,
         device="cpu",
         seed=42,
     )
     assert saved_zip.is_file()
     assert saved_zip.with_suffix(".json").is_file()
+    best_zip = tmp_path / "ppo_smoke_best" / "best_model.zip"
+    assert best_zip.is_file()
+    assert best_zip.with_suffix(".json").is_file()
 
-    # 3) Load PPOPolicy and verify live .act() returns valid button set
+    # 3) Load PPOPolicy and verify live .act() returns valid button set and caches frame_skip
     policy = PPOPolicy(saved_zip, device="cpu")
+    assert policy.frame_stack == 4
+    assert policy.frame_skip == 4
     keys = policy.act(None, _sample_state())
     assert isinstance(keys, set)
     assert keys.issubset(set().union(*ACTIONS))

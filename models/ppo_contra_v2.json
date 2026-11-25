@@ -1,0 +1,22 @@
+{
+  "model_path": "/home/msi/contra_ai_coplayer/models/ppo_contra_v2.zip",
+  "timesteps": 1000000,
+  "n_envs": 10,
+  "elapsed_sec": 1785.45,
+  "fps_steps_per_sec": 560.1,
+  "n_steps": 512,
+  "batch_size": 256,
+  "learning_rate": 0.0003,
+  "lr_decay": true,
+  "ent_coef": 0.015,
+  "net_arch": [
+    256,
+    256
+  ],
+  "frame_skip": 4,
+  "frame_stack": 4,
+  "terminate_on_p2_death": false,
+  "device": "cpu",
+  "seed": 42,
+  "resumed_from": null
+}

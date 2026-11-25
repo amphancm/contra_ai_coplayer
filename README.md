@@ -8,7 +8,7 @@ A Python Libretro frontend and AI co-player for NES **Contra** on Linux and WSL2
 - **SDL2 / Pygame Display & Input**: Resizable game window, layout-independent USB HID keyboard scancode input (works seamlessly with non-English keyboard layouts such as Thai), and hot-pluggable USB gamepad support.
 - **V4 Game State Detection**: Combines direct NES RAM extraction (players, lives, weapons, scores, scroll position, enemies, enemy/player bullets, stage & phase) with lightweight RGB frame heuristics (ground, pits, walls, overhead platforms).
 - **Live Terminal Dashboard & Debug Overlay**: Zero-dependency ANSI terminal HUD with real-time FPS, P1/P2 status, co-op spacing telemetry, entity counts, obstacle cues, and a 2D ASCII mini-radar, plus optional on-screen bounding-box overlay (`--debug-overlay`).
-- **V5 PPO Reinforcement Learning**: Custom Gymnasium environment (`ContraCoPlayerEnv`) with a 38-dim observation vector, 12 discrete actions, shaped co-op reward function, parallel `SubprocVecEnv` training (`contra-train`), checkpointing/resuming, and baseline comparison (`contra-eval`).
+- **V5 PPO Reinforcement Learning**: Custom Gymnasium environment (`ContraCoPlayerEnv`) with 4-frame stacked 38-dim observations (152-dim), 15 discrete actions, shaped co-op reward function, diverse simulated P1 partners (`DiverseP1Partner` / `RuleP1Partner`), parallel `SubprocVecEnv` training (`contra-train`) with `EvalCallback` best-model saving, checkpointing/resuming, and baseline comparison (`contra-eval`).
 
 ## Requirements
 
@@ -62,10 +62,12 @@ contra-coplayer \
 contra-coplayer \
   --core cores/fceumm_libretro.so \
   --rom 'roms/Contra (U).nes' \
-  --model models/ppo_contra.zip \
+  --model models/ppo_contra_v3_rulep1_best/best_model.zip \
   --auto-2p \
   --debug-overlay
 ```
+
+*(You can also pass `models/ppo_contra_v3_rulep1.zip` or any earlier checkpoint; `PPOPolicy` auto-detects `frame_stack` and `frame_skip` from the model and its `.json` metadata.)*
 
 ### Useful Runtime Flags
 
@@ -101,52 +103,76 @@ Keyboard input uses both keysyms and physical USB HID scancodes so controls rema
 
 Install the `[rl]` extras first (`pip install -e '.[rl]'`).
 
-### Train a PPO Model
+### Train a PPO Model (From Scratch)
 
 ```bash
 contra-train \
   --core cores/fceumm_libretro.so \
   --rom 'roms/Contra (U).nes' \
-  --out models/ppo_contra \
+  --out models/ppo_contra_v2 \
   --save-state states/stage1_2p.state \
-  --timesteps 1500000 \
-  --n-envs 8 \
+  --timesteps 1000000 \
+  --n-envs 10 \
   --batch-size 256 \
-  --checkpoint-freq 300000 \
+  --lr 3e-4 \
+  --ent-coef 0.015 \
+  --net-arch 256,256 \
+  --frame-stack 4 \
+  --p1-partner diverse \
+  --checkpoint-freq 250000 \
+  --eval-freq 100000 \
+  --eval-episodes 5 \
   --device cpu
 ```
 
-To resume training from an existing checkpoint:
+### Fine-Tune `ppo_contra_v3` (Diverse / Rule P1 Partner + Best-Model Eval)
+
+The V3 pipeline resumes from `models/ppo_contra_v2.zip` with `DiverseP1Partner` (a mix of `RuleP1Partner` and `ScriptedP1Partner`), linear learning-rate decay, 4-frame observation stacking, and periodic `EvalCallback` evaluation that saves the best model to `models/ppo_contra_v3_rulep1_best/best_model.zip`:
 
 ```bash
+# Using the helper script
+./scripts/train_v3_rulep1.sh
+
+# Or run contra-train directly
 contra-train \
   --core cores/fceumm_libretro.so \
   --rom 'roms/Contra (U).nes' \
-  --resume models/ppo_contra.zip \
-  --out models/ppo_contra_v2 \
-  --timesteps 500000 \
-  --n-envs 8 \
-  --device cpu
+  --save-state states/stage1_2p.state \
+  --resume models/ppo_contra_v2.zip \
+  --out models/ppo_contra_v3_rulep1 \
+  --timesteps 1000000 \
+  --n-envs 10 \
+  --batch-size 256 \
+  --lr 1e-4 \
+  --ent-coef 0.01 \
+  --frame-stack 4 \
+  --p1-partner diverse \
+  --checkpoint-freq 250000 \
+  --eval-freq 100000 \
+  --eval-episodes 5 \
+  --device cuda
 ```
 
 ### Evaluate PPO vs. RuleAI Baseline
 
 ```bash
-# Evaluate trained PPO model
+# Evaluate trained V3 PPO best model against RuleP1Partner
 contra-eval \
   --core cores/fceumm_libretro.so \
   --rom 'roms/Contra (U).nes' \
-  --model models/ppo_contra.zip \
+  --model models/ppo_contra_v3_rulep1_best/best_model.zip \
+  --p1-partner rule \
   --episodes 5
 
 # Evaluate RuleAI baseline (omit --model)
 contra-eval \
   --core cores/fceumm_libretro.so \
   --rom 'roms/Contra (U).nes' \
+  --p1-partner rule \
   --episodes 5
 ```
 
-For observation space, action space, reward shaping, and hyperparameter details, see [docs/rl_training.md](docs/rl_training.md).
+For observation space, 15-action space, reward shaping, P1 partner modes, and hyperparameter details, see [docs/rl_training.md](docs/rl_training.md).
 
 ## Project Structure
 
@@ -165,10 +191,13 @@ contra_ai_coplayer/
 │   ├── state.py                    # V4 GameStateDetector (NES RAM + RGB obstacle analysis)
 │   ├── app.py                      # Main pygame/SDL2 loop, RuleAI, input, debug overlay
 │   ├── dashboard.py                # Live ANSI terminal dashboard & ASCII mini-radar
-│   ├── env.py                      # V5 ContraCoPlayerEnv (Gymnasium), reward, ScriptedP1Partner
+│   ├── env.py                      # V5 ContraCoPlayerEnv (Gymnasium), reward, P1 partner policies
 │   ├── policy.py                   # PPOPolicy wrapper for live gameplay inference
-│   ├── train.py                    # Parallel PPO training pipeline & checkpointing
+│   ├── train.py                    # Parallel PPO training pipeline, EvalCallback & checkpointing
 │   └── eval_model.py               # Policy evaluation & comparison CLI
+├── scripts/
+│   ├── train_v2_2m.sh              # V2 2M-step resume training script
+│   └── train_v3_rulep1.sh          # V3 diverse/rule P1 partner training script
 ├── tests/
 │   ├── test_core.py                # Frame decoding, RuleAI, scancode mapping tests
 │   ├── test_v4.py                  # RAM state detection, obstacle heuristics, dashboard, ROM tests
@@ -176,7 +205,7 @@ contra_ai_coplayer/
 ├── cores/                          # Local Libretro core (e.g., fceumm_libretro.so)
 ├── roms/                           # Local NES ROMs (git-ignored)
 ├── states/                         # Bootstrap save states (git-ignored)
-└── models/                         # Trained PPO models, JSON metadata, and checkpoints
+└── models/                         # Trained PPO models, best eval models, JSON metadata, checkpoints
 ```
 
 ## Tests
@@ -192,13 +221,13 @@ Integration tests that require `cores/fceumm_libretro.so` and `roms/Contra (U).n
 ## Documentation
 
 - [Architecture & State Detection](docs/architecture.md) — Runtime pipeline, module breakdown, `Contra (U)` NES RAM map, and RGB obstacle heuristics.
-- [RL Training & Evaluation Guide](docs/rl_training.md) — `ContraCoPlayerEnv` design, 38-dim observation vector, 12-action space, co-op reward shaping, and PPO tuning.
+- [RL Training & Evaluation Guide](docs/rl_training.md) — `ContraCoPlayerEnv` design, 38-dim × 4 stacked observations, 15-action space, co-op reward shaping, P1 partner modes, and V3 PPO training.
 - [CLI & Controls Reference](docs/cli_reference.md) — All CLI flags for `contra-coplayer`, `contra-train`, and `contra-eval`, plus dashboard and overlay legends.
 
 ## Scope & Limitations
 
 - **ROM & Region Specificity**: RAM offsets in `GameStateDetector` are mapped for `Contra (U).nes`. Other regions or ROM hacks may differ in memory layout.
-- **RL Training Scope**: The default bootstrap state starts in Stage 1 (Jungle) 2-Player mode with a scripted P1 partner (`ScriptedP1Partner`). Generalization to later stages or very different human playstyles may require additional save states and fine-tuning.
+- **RL Training Scope**: The default bootstrap state starts in Stage 1 (Jungle) 2-Player mode with simulated P1 partners (`DiverseP1Partner`, `RuleP1Partner`, or `ScriptedP1Partner`). Generalization to later stages or very different human playstyles may require additional save states and fine-tuning.
 - **Audio Sync**: Libretro audio batch callbacks are copied immediately and fed to SDL2 queued audio with a ~250 ms latency cap rather than sample-accurate resampling.
 - **Frame Pacing**: Uses `retro_get_system_av_info()` FPS and `time.perf_counter()`; late frames are not skipped.
 - **Platform**: Targets Linux and WSL2 (little-endian signed 16-bit stereo PCM for SDL2 audio). USB gamepad passthrough on WSL2 depends on host USBIP setup; keyboard works out of the box.

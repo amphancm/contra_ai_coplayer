@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .app import RuleAI
-from .env import ACTIONS, ContraCoPlayerEnv
+from .env import ACTIONS, OBS_DIM, ContraCoPlayerEnv
 
 
 @dataclass
@@ -46,23 +46,29 @@ def evaluate_policy(
     episodes: int = 5,
     max_steps: int = 800,
     frame_skip: int = 4,
+    p1_partner: str = "scripted",
     deterministic: bool = True,
     seed: int = 123,
 ) -> EvalSummary:
     ppo_model = None
-    label = "RuleAI Baseline"
+    frame_stack = 1
+    label = f"RuleAI Baseline (p1={p1_partner})"
     if model_path:
         from stable_baselines3 import PPO
 
-        ppo_model = PPO.load(model_path)
-        label = f"PPO ({model_path})"
+        ppo_model = PPO.load(model_path, device="cpu")
+        obs_dim = int(ppo_model.observation_space.shape[0])
+        frame_stack = max(1, obs_dim // OBS_DIM)
+        label = f"PPO ({model_path}, stack={frame_stack}, p1={p1_partner})"
 
     env = ContraCoPlayerEnv(
         core_path=core_path,
         rom_path=rom_path,
         state_path=state_path,
         frame_skip=frame_skip,
+        frame_stack=frame_stack,
         max_steps=max_steps,
+        p1_partner=p1_partner,
     )
 
     rewards, scrolls, scores, steps_list, deaths_list, dists = [], [], [], [], [], []
@@ -133,6 +139,12 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=800)
     parser.add_argument("--frame-skip", type=int, default=4)
+    parser.add_argument(
+        "--p1-partner",
+        choices=("scripted", "rule", "diverse"),
+        default="scripted",
+        help="Simulated P1 partner policy for evaluation",
+    )
     parser.add_argument("--stochastic", action="store_true", help="Use stochastic PPO actions")
     parser.add_argument("--seed", type=int, default=123)
     args = parser.parse_args()
@@ -145,6 +157,7 @@ def main() -> None:
         episodes=args.episodes,
         max_steps=args.max_steps,
         frame_skip=args.frame_skip,
+        p1_partner=args.p1_partner,
         deterministic=not args.stochastic,
         seed=args.seed,
     )

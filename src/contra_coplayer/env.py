@@ -1,6 +1,7 @@
 """V5 Gymnasium Environment, Observation Encoder, and Co-Op Reward Function for Contra."""
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -11,12 +12,12 @@ from gymnasium import spaces
 import numpy as np
 
 from .libretro import LibretroHost
-from .state import GameState, GameStateDetector
+from .state import GameState, GameStateDetector, ObstacleInfo, analyze_obstacles
 
 # Libretro joypad button IDs
 B, Y, SELECT, START, UP, DOWN, LEFT, RIGHT, A = 0, 1, 2, 3, 4, 5, 6, 7, 8
 
-# Discrete action set for P2 AI (12 expressive Contra actions)
+# Discrete action set for P2 AI (15 expressive Contra actions; 0..11 preserved for backward compatibility)
 ACTIONS: tuple[frozenset[int], ...] = (
     frozenset(),                    # 0: NOOP
     frozenset({RIGHT}),             # 1: Walk right
@@ -30,12 +31,16 @@ ACTIONS: tuple[frozenset[int], ...] = (
     frozenset({DOWN, RIGHT, B}),    # 9: Aim down-right + shoot
     frozenset({DOWN, B}),           # 10: Crouch / prone + shoot
     frozenset({B}),                 # 11: Stand + shoot
+    frozenset({UP, B}),             # 12: Aim straight up + shoot
+    frozenset({DOWN, A}),           # 13: Drop down from platform
+    frozenset({A, B}),              # 14: Jump in place + shoot
 )
 
 ACTION_NAMES: tuple[str, ...] = (
     "NOOP", "RIGHT", "LEFT", "RIGHT+B", "LEFT+B",
     "RIGHT+A", "RIGHT+A+B", "LEFT+A+B", "UP+RIGHT+B",
     "DOWN+RIGHT+B", "DOWN+B", "B",
+    "UP+B", "DOWN+A", "A+B",
 )
 
 OBS_DIM = 38
@@ -99,24 +104,28 @@ def encode_observation(state: GameState) -> np.ndarray:
 @dataclass(frozen=True)
 class RewardConfig:
     progress_weight: float = 0.04
-    p2_score_weight: float = 0.02
-    p1_score_weight: float = 0.005
-    survival_bonus: float = 0.01
+    p2_score_weight: float = 0.004
+    p1_score_weight: float = 0.001
+    survival_bonus: float = 0.015
     coop_sync_bonus: float = 0.02
     coop_sync_max_dist: float = 85.0
     too_far_penalty: float = -0.03
     too_far_dist: float = 115.0
-    weapon_upgrade_bonus: float = 3.0
-    danger_penalty: float = -0.04
-    danger_dist: float = 18.0
-    death_penalty: float = -6.0
-    stage_clear_bonus: float = 25.0
+    weapon_upgrade_bonus: float = 4.0
+    danger_penalty: float = -0.08
+    danger_dist: float = 36.0
+    death_penalty: float = -20.0
+    stage_clear_bonus: float = 40.0
+    stagnation_penalty: float = -0.02
+    stagnation_steps: int = 30
 
 
 def compute_reward(
     prev: GameState,
     curr: GameState,
     cfg: RewardConfig = RewardConfig(),
+    *,
+    stagnant: bool = False,
 ) -> tuple[float, dict[str, float]]:
     """Compute shaped Co-Op reward for Player 2 from consecutive GameStates."""
     terms: dict[str, float] = {}
@@ -143,12 +152,17 @@ def compute_reward(
     weapon_up = curr.p2.active and (curr.p2.weapon_id > 0) and (curr.p2.weapon_id != prev.p2.weapon_id)
     terms["weapon"] = cfg.weapon_upgrade_bonus if weapon_up else 0.0
 
-    in_danger = (
+    danger = 0.0
+    if (
         curr.p2.active
         and curr.nearest_threat_dist is not None
         and curr.nearest_threat_dist < cfg.danger_dist
-    )
-    terms["danger"] = cfg.danger_penalty if in_danger else 0.0
+    ):
+        proximity = max(0.0, 1.0 - (curr.nearest_threat_dist / max(cfg.danger_dist, 1e-6)))
+        danger = cfg.danger_penalty * (0.25 + 0.75 * proximity)
+    terms["danger"] = danger
+
+    terms["stagnation"] = cfg.stagnation_penalty if (curr.p2.active and stagnant) else 0.0
 
     p2_died = curr.p2.lives < prev.p2.lives
     terms["death"] = cfg.death_penalty if p2_died else 0.0
@@ -194,6 +208,129 @@ class ScriptedP1Partner:
         return keys
 
 
+class RuleP1Partner:
+    """Smart co-op Player 1 partner that dodges pits, walls, enemies, and bullets."""
+
+    def __init__(
+        self,
+        rng: np.random.Generator | None = None,
+        *,
+        pause_prob: float = 0.008,
+        coop_wait_dx: float = 85.0,
+    ):
+        self.rng = rng or np.random.default_rng()
+        self.pause_prob = pause_prob
+        self.coop_wait_dx = coop_wait_dx
+        self.t = 0
+        self._pause_until = 0
+        self._jump_until = 0
+
+    def reset(self, rng: np.random.Generator | None = None) -> None:
+        if rng is not None:
+            self.rng = rng
+        self.t = 0
+        self._pause_until = 0
+        self._jump_until = 0
+
+    def act(
+        self,
+        state: GameState | None,
+        obstacles_p1: ObstacleInfo | None = None,
+    ) -> set[int]:
+        self.t += 1
+        keys: set[int] = set()
+        if self.t % 6 < 3:
+            keys.add(B)
+
+        advance = True
+        if self.t < self._pause_until:
+            advance = False
+        elif self.rng.random() < self.pause_prob:
+            self._pause_until = self.t + int(self.rng.integers(8, 22))
+            advance = False
+
+        should_jump = self.t < self._jump_until
+        if state is not None and state.p1.active:
+            p1 = state.p1
+            # Wait briefly if P1 runs far ahead of active P2
+            if state.p2.active and (p1.x - state.p2.x) > self.coop_wait_dx:
+                advance = False
+
+            # Jump over pits or walls ahead of P1
+            if obstacles_p1 is not None and (obstacles_p1.pit_ahead or obstacles_p1.wall_ahead):
+                self._jump_until = max(self._jump_until, self.t + 14)
+                should_jump = True
+
+            # Dodge incoming enemy bullets near P1
+            if not should_jump:
+                for eb in state.enemy_bullets:
+                    dx = eb.x - p1.x
+                    dy = abs(eb.y - p1.y)
+                    if -12 <= dx <= 38 and dy <= 20:
+                        self._jump_until = max(self._jump_until, self.t + 12)
+                        should_jump = True
+                        break
+
+            # Jump over close enemies directly ahead of P1
+            if not should_jump:
+                for en in state.enemies:
+                    dx = en.x - p1.x
+                    dy = abs(en.y - p1.y)
+                    if 0 <= dx <= 26 and dy <= 18:
+                        self._jump_until = max(self._jump_until, self.t + 12)
+                        should_jump = True
+                        break
+
+        if advance:
+            keys.add(RIGHT)
+        if should_jump:
+            keys.add(A)
+        return keys
+
+
+class DiverseP1Partner:
+    """Samples a different P1 partner style each episode for better generalization."""
+
+    def __init__(self, rng: np.random.Generator | None = None):
+        self.rng = rng or np.random.default_rng()
+        self._rule_normal = RuleP1Partner(self.rng, pause_prob=0.008, coop_wait_dx=85.0)
+        self._rule_cautious = RuleP1Partner(self.rng, pause_prob=0.022, coop_wait_dx=60.0)
+        self._scripted = ScriptedP1Partner(self.rng)
+        self._active: RuleP1Partner | ScriptedP1Partner = self._rule_normal
+
+    def reset(self, rng: np.random.Generator | None = None) -> None:
+        if rng is not None:
+            self.rng = rng
+        r = float(self.rng.random())
+        if r < 0.60:
+            self._active = self._rule_normal
+        elif r < 0.80:
+            self._active = self._rule_cautious
+        else:
+            self._active = self._scripted
+        self._active.reset(self.rng)
+
+    def act(
+        self,
+        state: GameState | None,
+        obstacles_p1: ObstacleInfo | None = None,
+    ) -> set[int]:
+        if isinstance(self._active, RuleP1Partner):
+            return self._active.act(state, obstacles_p1=obstacles_p1)
+        return self._active.act(state)
+
+
+def _make_p1_partner(kind: str) -> ScriptedP1Partner | RuleP1Partner | DiverseP1Partner:
+    k = (kind or "scripted").strip().lower()
+    if k == "rule":
+        return RuleP1Partner()
+    if k == "diverse":
+        return DiverseP1Partner()
+    if k == "scripted":
+        return ScriptedP1Partner()
+    raise ValueError(f"Unknown p1_partner={kind!r}. Choose from: scripted, rule, diverse")
+
+
 def bootstrap_stage1_2p_state(host: LibretroHost, detector: GameStateDetector) -> bytes:
     """Boot Contra (U) from power-on into Stage 1 2-Player gameplay and return serialized state."""
     for i in range(900):
@@ -224,9 +361,11 @@ class ContraCoPlayerEnv(gym.Env):
         *,
         state_path: str | Path | None = None,
         frame_skip: int = 4,
+        frame_stack: int = 1,
         max_steps: int = 1500,
         reward_config: RewardConfig = RewardConfig(),
         p1_policy: Callable[[GameState | None], set[int]] | None = None,
+        p1_partner: str = "scripted",
         terminate_on_p2_death: bool = False,
         render_mode: str | None = None,
     ):
@@ -235,28 +374,43 @@ class ContraCoPlayerEnv(gym.Env):
         self.rom_path = str(rom_path)
         self.state_path = Path(state_path) if state_path else None
         self.frame_skip = max(1, int(frame_skip))
+        self.frame_stack = max(1, int(frame_stack))
         self.max_steps = int(max_steps)
         self.reward_config = reward_config
+        self.p1_partner_kind = p1_partner
         self.terminate_on_p2_death = terminate_on_p2_death
         self.render_mode = render_mode
 
         self.action_space = spaces.Discrete(len(ACTIONS))
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(OBS_DIM * self.frame_stack,), dtype=np.float32
         )
 
         self.host = LibretroHost(self.core_path, self.rom_path)
         self.detector = GameStateDetector()
-        self._scripted_p1 = ScriptedP1Partner()
+        self._scripted_p1 = _make_p1_partner(p1_partner)
         self.p1_policy = p1_policy
         self._init_state: bytes | None = None
         self._last_frame: np.ndarray | None = None
         self._last_state: GameState | None = None
+        self._obs_stack: deque[np.ndarray] = deque(maxlen=self.frame_stack)
         self._steps = 0
         self._total_frames = 0
+        self._stagnant_steps = 0
         self._ep_deaths = 0
         self._ep_dist_sum = 0.0
         self._ep_dist_count = 0
+
+    def _stacked_obs(self, obs: np.ndarray, *, reset: bool = False) -> np.ndarray:
+        if self.frame_stack <= 1:
+            return obs
+        if reset or not self._obs_stack:
+            self._obs_stack.clear()
+            for _ in range(self.frame_stack):
+                self._obs_stack.append(obs)
+        else:
+            self._obs_stack.append(obs)
+        return np.concatenate(list(self._obs_stack), axis=0)
 
     def _ensure_init_state(self) -> bytes:
         if self._init_state is not None:
@@ -284,11 +438,12 @@ class ContraCoPlayerEnv(gym.Env):
         self._last_frame = frame
         self._steps = 0
         self._total_frames = 0
+        self._stagnant_steps = 0
         self._ep_deaths = 0
         self._ep_dist_sum = 0.0
         self._ep_dist_count = 0
         self._last_state = self.detector.detect(frame, self.host.read_ram(), frame_idx=0)
-        return encode_observation(self._last_state), {"state": self._last_state}
+        return self._stacked_obs(encode_observation(self._last_state), reset=True), {"state": self._last_state}
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         assert self._last_state is not None, "Call reset() before step()"
@@ -296,8 +451,21 @@ class ContraCoPlayerEnv(gym.Env):
         p2_keys = set(ACTIONS[int(action)])
 
         frame = self._last_frame
+        obstacles_p1: ObstacleInfo | None = None
+        if (
+            self.p1_policy is None
+            and isinstance(self._scripted_p1, (RuleP1Partner, DiverseP1Partner))
+            and self._last_state.p1.active
+        ):
+            obstacles_p1 = analyze_obstacles(frame, self._last_state.p1.x, self._last_state.p1.y)
+
         for _ in range(self.frame_skip):
-            p1_keys = self.p1_policy(self._last_state) if self.p1_policy else self._scripted_p1.act(self._last_state)
+            if self.p1_policy is not None:
+                p1_keys = self.p1_policy(self._last_state)
+            elif isinstance(self._scripted_p1, (RuleP1Partner, DiverseP1Partner)):
+                p1_keys = self._scripted_p1.act(self._last_state, obstacles_p1=obstacles_p1)
+            else:
+                p1_keys = self._scripted_p1.act(self._last_state)
             # Toggle fire slightly on held B so NES semi-auto rifle fires continuously
             step_p2 = set(p2_keys)
             if B in step_p2 and (self._total_frames % 6 >= 3):
@@ -310,7 +478,17 @@ class ContraCoPlayerEnv(gym.Env):
         self._last_state = curr_state
         self._steps += 1
 
-        reward, terms = compute_reward(prev_state, curr_state, self.reward_config)
+        if curr_state.scroll_x > prev_state.scroll_x:
+            self._stagnant_steps = 0
+        else:
+            self._stagnant_steps += 1
+
+        reward, terms = compute_reward(
+            prev_state,
+            curr_state,
+            self.reward_config,
+            stagnant=(self._stagnant_steps >= self.reward_config.stagnation_steps),
+        )
         if curr_state.p2.lives < prev_state.p2.lives:
             self._ep_deaths += 1
         if curr_state.p1.active and curr_state.p2.active:
@@ -335,7 +513,7 @@ class ContraCoPlayerEnv(gym.Env):
             "p2_deaths": self._ep_deaths,
             "mean_p1_p2_dist": (self._ep_dist_sum / self._ep_dist_count) if self._ep_dist_count else 0.0,
         }
-        return encode_observation(curr_state), reward, terminated, truncated, info
+        return self._stacked_obs(encode_observation(curr_state)), reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
         if self.render_mode == "rgb_array":
