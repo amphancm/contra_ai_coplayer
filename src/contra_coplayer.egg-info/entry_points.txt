@@ -1,0 +1,4 @@
+[console_scripts]
+contra-coplayer = contra_coplayer.app:main
+contra-eval = contra_coplayer.eval_model:main
+contra-train = contra_coplayer.train:main

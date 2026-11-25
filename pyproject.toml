@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "contra-coplayer"
+version = "0.5.0"
+description = "Direct Libretro Contra co-player with SDL2 frontend, V4 state detection, terminal dashboard, and V5 PPO RL"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pygame>=2.5"]
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+rl = ["gymnasium>=1.0", "stable-baselines3>=2.3", "torch>=2.2"]
+[project.scripts]
+contra-coplayer = "contra_coplayer.app:main"
+contra-train = "contra_coplayer.train:main"
+contra-eval = "contra_coplayer.eval_model:main"
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,10 @@
+numpy>=1.24
+pygame>=2.5
+
+[dev]
+pytest>=7
+
+[rl]
+gymnasium>=1.0
+stable-baselines3>=2.3
+torch>=2.2
